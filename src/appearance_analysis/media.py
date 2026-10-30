@@ -10,8 +10,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from itertools import islice
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
@@ -229,35 +231,44 @@ def discover(db: sqlite3.Connection, query: str, *, limit: int = 10,
         pending.append((locator, safe_locator))
     enriched = 0
     stopped_early = False
+    queued = iter(pending)
+    in_flight: deque = deque()
     with ThreadPoolExecutor(max_workers=_DISCOVER_WORKERS) as pool, db:
-        futures = [pool.submit(_extract, locator) for locator, _ in pending]
-        for number, (future, (_, safe_locator)) in enumerate(zip(futures, pending), 1):
+        # At most one extraction per worker is in flight, so none starts once `limit` candidates qualify.
+        for locator, safe_locator in islice(queued, _DISCOVER_WORKERS):
+            in_flight.append((pool.submit(_extract, locator), safe_locator))
+        number = 0
+        while in_flight:
+            future, safe_locator = in_flight.popleft()
+            number += 1
             try:
                 candidate, metadata = _candidate(future.result(), safe_locator)
             except InputError as exc:
                 candidate = None
                 failures.append({"url": safe_locator, "error": str(exc)})
             print(f"discover: enriched {number}/{len(pending)}", file=sys.stderr, flush=True)
-            if candidate is None:
-                continue
-            enriched += 1
-            db.execute("""INSERT INTO candidates(locator,title,publisher,upload_date,duration,metadata)
-              VALUES(?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET title=excluded.title,
-              publisher=excluded.publisher,upload_date=excluded.upload_date,duration=excluded.duration,
-              metadata=excluded.metadata""", (candidate["locator"], candidate["title"], candidate["publisher"],
-              candidate["upload_date"], candidate["duration"], json.dumps(metadata, ensure_ascii=False, allow_nan=False)))
-            if candidate["duration"] is None:
-                unknown_duration.append(candidate)
-            elif candidate["duration"] >= minimum:
-                if candidate["upload_date"] is None:
-                    undated.append(candidate)
-                elif boundary is None or candidate["upload_date"] >= boundary:
-                    dated.append(candidate)
-            if len(dated) >= limit and number < len(futures):
-                stopped_early = True
-                for remaining in futures[number:]:
+            if candidate is not None:
+                enriched += 1
+                db.execute("""INSERT INTO candidates(locator,title,publisher,upload_date,duration,metadata)
+                  VALUES(?,?,?,?,?,?) ON CONFLICT(locator) DO UPDATE SET title=excluded.title,
+                  publisher=excluded.publisher,upload_date=excluded.upload_date,duration=excluded.duration,
+                  metadata=excluded.metadata""", (candidate["locator"], candidate["title"], candidate["publisher"],
+                  candidate["upload_date"], candidate["duration"], json.dumps(metadata, ensure_ascii=False, allow_nan=False)))
+                if candidate["duration"] is None:
+                    unknown_duration.append(candidate)
+                elif candidate["duration"] >= minimum:
+                    if candidate["upload_date"] is None:
+                        undated.append(candidate)
+                    elif boundary is None or candidate["upload_date"] >= boundary:
+                        dated.append(candidate)
+            following = next(queued, None)
+            if len(dated) >= limit:
+                stopped_early = bool(in_flight) or following is not None
+                for remaining, _ in in_flight:
                     remaining.cancel()
                 break
+            if following is not None:
+                in_flight.append((pool.submit(_extract, following[0]), following[1]))
     dated.sort(key=lambda candidate: candidate["upload_date"], reverse=True)
     return {"query": query.strip(), "candidates": dated[:limit], "missing_upload_date": undated,
             "missing_duration": unknown_duration, "metadata_failures": failures,
