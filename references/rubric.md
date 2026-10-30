@@ -1,6 +1,6 @@
 # Subjective communication rubric
 
-The host assigns six integer ratings from 0 through 10, or `null`. These are anchored interpretive judgments about performance in the reviewed sources, not psychometric measurements. Apply the same anchors across subjects, adjusted to their roles and actual opportunities. Cite observation IDs for every non-null rating, including counterexamples when they qualify the rationale.
+The host assigns six integer ratings from 0 through 10, or `null`. These are anchored interpretive judgments about performance in the reviewed sources, not psychometric measurements. Apply the same anchors across subjects, adjusted to their roles and actual opportunities. Cite observation IDs for every non-null rating, including counterexamples when they qualify the rationale. At least one cited observation must have identity-supported attribution ([json-contract](json-contract.md#ratings-schema-scores)); caption-only sources without mapped speaker labels can only receive null ratings.
 
 | Measure | 0-2 | 4-6 | 8-10 |
 | --- | --- | --- | --- |

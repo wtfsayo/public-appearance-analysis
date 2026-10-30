@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0
+
+- Rolling YouTube auto-captions (`<c>` word timing or `align:start position:0%`) keep each spoken line once instead of about three times.
+- Speaker labels are split from caption text only when the prefix looks like a name (`HOST:`, `>> SARAH CHEN:`); sentences such as "The real question is: …" keep their full text. Timed JSON takes speakers only from its `speaker` field.
+- `discover` skips search hits shorter than `--min-duration`, enriches the rest in parallel, stops once `--limit` dated candidates qualify and reports progress on stderr.
+- Packet files are compact JSON with cue arrays (`cue_fields`); `packets` and `audit` warn when a subject has no supported speaker mapping, and the numeric-score error names that cause.
+- `diarize` and `transcribe` print summaries and write full diagnostics to `diarization.json` / `asr.json`; `observations` pages with `--limit`/`--offset`.
+- Only `init` creates a project; other commands require an existing project, reject an empty `--project`, and refuse projects inside the plugin directory.
+- The wrapper keeps its uv environment outside the versioned plugin directory; `doctor` reports optional extras as installed on first use.
+- Skills pre-approve the wrapper, use a literal `<PROJECT>` placeholder, run long commands in the background, wait for agents, load references on demand and state completion criteria. Setup prerequisites moved to `references/setup.md`.
+
 ## 1.0.0
 
 - Added the `public-appearance` Claude Code plugin with user-invoked analyze, compare, score, audit and setup skills, a bounded source analyst, and a read-only evidence reviewer.

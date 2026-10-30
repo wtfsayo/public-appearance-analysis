@@ -6,22 +6,14 @@ Claude reads the actual source packets and makes semantic judgments. Python retr
 
 ## Load the plugin
 
-Download or copy this project to a local directory. No hosted repository is assumed. Install [Claude Code](https://code.claude.com/docs/en/setup), [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.11 or newer. `uv` can provision a compatible Python environment.
-
-For one session, from the downloaded project directory:
+Install [Claude Code](https://code.claude.com/docs/en/setup) and [uv](https://docs.astral.sh/uv/getting-started/installation/); `uv` provisions Python 3.11 or newer if needed. Then add the GitHub marketplace and install the plugin:
 
 ```sh
-claude --plugin-dir "$PWD"
+claude plugin marketplace add wtfsayo/public-appearance-analysis
+claude plugin install public-appearance@public-appearance-local --scope user
 ```
 
-To install explicitly from the included local marketplace, run these commands yourself from that directory:
-
-```sh
-claude plugin marketplace add "$PWD"
-claude plugin install public-appearance@public-appearance-local --scope local
-```
-
-The first command registers the local marketplace. The second opts into this workspace's private local settings; use `--scope project` only if you want a shared project installation, or `--scope user` for all projects. Restart Claude Code after installation if needed. This package does not edit settings or install itself. It has no hooks, daemons, MCP wrappers or external LLM credentials.
+Use `--scope project` for a shared project installation or `--scope local` for this workspace only. From a downloaded copy, `claude plugin marketplace add "$PWD"` registers the same marketplace locally, and `claude --plugin-dir "$PWD"` loads the plugin for one session. Restart Claude Code after installation if needed. This package does not edit settings or install itself. It has no hooks, daemons, MCP wrappers or external LLM credentials.
 
 Available skills are user-invoked, with `disable-model-invocation: true`:
 
@@ -37,21 +29,13 @@ For example, ask `/public-appearance:analyze` to analyze an authorized source UR
 
 ## Choose the dependencies you need
 
-| Task | Requirements |
-| --- | --- |
-| Import timed transcripts, review evidence, score and report | Core Python package, including `jsonschema` |
-| Discover or download supported public URLs | `yt-dlp` executable |
-| Probe/decode local or downloaded audio | `ffmpeg` and `ffprobe` executables |
-| Diarize anonymous voices | `media` extra: NumPy, SoundFile, scikit-learn, sherpa-onnx; downloaded diarization models |
-| Transcribe source-language speech | `asr` extra: faster-whisper and its dependencies; requested ASR model |
+[references/setup.md](references/setup.md) lists the prerequisites per task (yt-dlp, FFmpeg, the `media` and `asr` extras, models) with install commands. `/public-appearance:setup` reads it and checks your machine with `doctor`.
 
-On macOS with Homebrew, external media tools can be installed with `brew install ffmpeg yt-dlp`. On Debian/Ubuntu, install `ffmpeg` through the system package manager and install a current `yt-dlp` with `uv tool install yt-dlp`. Follow the tools' official instructions on other platforms. Check that the executables are on `PATH`.
-
-The POSIX `bin/appearance` wrapper invokes `uv` using its own plugin root, regardless of your current working directory. It preserves all arguments. Only `diarize` selects the `media` extra; only `transcribe` selects the `asr` extra. `doctor`, caption workflows and model downloads stay on core dependencies. Optional packages can be large. `uv` installs them when the corresponding command is invoked, not when the plugin loads. On Windows, use WSL/Git Bash for the wrapper or the direct `uv run` commands below.
+The POSIX `bin/appearance` wrapper invokes `uv` using its own plugin root, regardless of your current working directory, and preserves all arguments. Only `diarize` selects the `media` extra and only `transcribe` selects the `asr` extra; `uv` installs them on first use. The Python environment lives outside the plugin directory (`$APPEARANCE_VENV`, else `$CLAUDE_PLUGIN_DATA/venv`, else `~/.local/share/public-appearance/venv`), so plugin updates reuse it. On Windows, use WSL/Git Bash for the wrapper or the direct `uv run` commands below.
 
 ## Start a separate analysis project
 
-Set `PLUGIN_ROOT` to the downloaded plugin directory and `PROJECT` to a user-owned directory outside it. The following commands work from a terminal; `${CLAUDE_PLUGIN_ROOT}` in the skills is a Claude Code substitution, not a shell variable you must set globally.
+Set `PLUGIN_ROOT` to the downloaded plugin directory and `PROJECT` to a user-owned directory outside it. The following commands work from a terminal; `${CLAUDE_PLUGIN_ROOT}` in the skills is a Claude Code substitution, not a shell variable you must set globally. `init` creates the project; every other command refuses a directory without one, and the wrapper refuses projects inside the plugin directory.
 
 ```sh
 PLUGIN_ROOT="$PWD"
@@ -84,7 +68,7 @@ Discovery is separate from ingest:
 "$PLUGIN_ROOT/bin/appearance" --project "$PROJECT" discover "$QUERY" --limit 10 --min-duration 1200 --after 2025-01-01
 ```
 
-Without a user-specified period, the host favors recent full appearances. Results use actual upload dates and keep missing dates distinct. Date ordering applies only within metadata-enriched relevance-search candidates, not all appearances on the platform. YouTube search is not an exhaustive chronology. The host must inspect completeness, original publisher and context; a "LIVE" title does not prove a loop is a full interview. Only selected sources become analyzed sources.
+Without a user-specified period, the host favors recent full appearances. Results use actual upload dates and keep missing dates distinct. Date ordering applies only within metadata-enriched relevance-search candidates, not all appearances on the platform. YouTube search is not an exhaustive chronology. The host must inspect completeness, original publisher and context; a "LIVE" title does not prove a loop is a full interview. Only selected sources become analyzed sources. `discover`, full `ingest`, `transcribe`, `diarize` and `setup-models` can take many minutes on long sources; Claude runs them in the background.
 
 ### Optional audio work
 
@@ -98,11 +82,9 @@ After ingest, set `SOURCE_ID` to the actual ID returned by the CLI. Finish audio
 
 Diarization uses real speech segmentation, ERes2Net embeddings and clustering, with independent TitaNet sample/pair diagnostics where there are enough voices. Anonymous labels and embedding-consistency diagnostics do not establish identity or accuracy. Supply `--speakers N` only when introductions or other source evidence justify the count. Keep uncertain cue labels uncertain.
 
-`setup-models` explicitly downloads SHA256-pinned public assets from the [sherpa-onnx project](https://github.com/k2-fsa/sherpa-onnx). Pins verify expected content, not upstream signatures. Model origin/license information is preserved in the model manifest. Defaults use the standard user cache; `--models-dir PATH` overrides it. Models are not bundled in this repository. Third-party licenses apply separately from this project's MIT license.
+Model downloads, origins and licenses are described in [references/setup.md](references/setup.md#models). `--language CODE` supplies a known source language for transcription. When captions already exist, ASR remains a cross-check rather than replacing them. Caption language metadata can be wrong, especially for transliteration and code-switching. Retain disagreements rather than silently polishing uncertain text.
 
-Transcription uses faster-whisper in the original language and can download the requested ASR model on invocation. `--model PATH` can select a local model; `--language CODE` supplies a known language. When captions already exist, ASR remains a cross-check rather than replacing them. Caption language metadata can be wrong, especially for transliteration and code-switching. Retain disagreements rather than silently polishing uncertain text.
-
-If ASR is needed, transcribe before diarization so anonymous voice assignments can be attached to its newly created cues. Then map names and generate packets. Transcription and diarization are both frozen once packets exist; a second transcript must not change already reviewed context.
+If ASR is needed, transcribe before diarization so anonymous voice assignments attach to its new cues. Then map names and generate packets; the first `packets` call freezes the source's evidence ([evidence freeze](references/cli.md#evidence-freeze)). Numeric scores need a supported speaker mapping, so caption-only sources without speaker labels can only receive null ratings ([ratings](references/json-contract.md#ratings-schema-scores)).
 
 Direct equivalents, without the wrapper:
 
@@ -118,10 +100,8 @@ uv run --project "$PLUGIN_ROOT" --extra asr appearance --project "$PROJECT" tran
 The host model owns the analytical steps. It should read the [method](references/methodology.md), [CLI reference](references/cli.md) and [JSON contract](references/json-contract.md), then execute this sequence:
 
 1. Establish speaker labels and map names only with nonvisual evidence. A map needs spoken-introduction cues, a publisher-credit URL, an evidenced named voice reference, or an explicit user-supplied mapping. Caption labels and cluster centroids alone do not verify names. Use `schema speakers`, then `map-speakers SOURCE_ID --input FILE`.
-2. Generate `packets SOURCE_ID --size 80 --context 3`. Read each returned packet file in order. Lower the size for dense sources. Review every target cue, preserving exact IDs and all question/answer context. Keep a question ledger and scan later packets for delayed replies before calling an exchange a non-answer.
-3. Write finalized review JSON for every batch, including batches with no observations. Use `schema review`, then `review-batch --input FILE`; keep the actual returned observation IDs. Cue text/segmentation is frozen once packets exist. A changed transcript needs a new project rather than rewriting reviewed evidence.
-   If a delayed reply or other evidence changes an already imported judgment, use `schema observation` and `revise-observation OBSERVATION_ID --input FILE`. Supply the full corrected observation for the same source/subject. The previous record is archived; the subject's profiles/ratings and all comparisons are invalidated. Reassess and re-import them before rendering a new report.
-   Previously rendered reports are tracked and marked stale after a correction. The command reports any externally changed or unwritable artifacts it could not mark; do not share those old files. Re-render after importing the reassessed judgments.
+2. Generate `packets SOURCE_ID --size 80 --context 3`. Read each returned packet file in order, or have `source-analyst` read it. Lower the size for dense sources. Review every target cue, preserving exact IDs and all question/answer context. Keep a question ledger and scan later packets for delayed replies before calling an exchange a non-answer.
+3. Write finalized review JSON for every batch, including batches with no observations. Use `schema review`, then `review-batch --input FILE`; keep the actual returned observation IDs. To correct an imported judgment later, use `revise-observation` ([observation correction](references/json-contract.md#observation-correction-schema-observation)).
 4. Use `observations` to retrieve evidence. Write original profiles with strengths, vulnerabilities, counterexamples and explicit limits; import using `import-profile FILE`. Add comparisons with evidence from at least two subjects using `import-comparison FILE`. All claims stay within supported subjects/scopes.
 5. If requested, import all six anchored subjective scores with `import-scores FILE`. Run `scorecard` and changed-weight `sensitivity`. Obtain independent evidence review, run `audit`, resolve unsupported claims and missing coverage, then render `report`.
 
@@ -138,9 +118,7 @@ The CLI's `schema {review,observation,profile,scores,comparison,speakers}` comma
 
 ## Scores are subjective, missingness is explicit
 
-The [rubric](references/rubric.md) anchors clarity, structure, precision, responsiveness, engagement and adaptability on integer 0-10 scales. Each non-null rating cites observations and explains the role/context. `null` means unassessable, not poor. A prepared monologue without questions may leave responsiveness unassessable.
-
-Default weights are all 1. Explicit finite, nonnegative weights can be changed with `weights --input FILE`; at least one must be positive. The overall is the weighted mean only when every active measure is non-null. Missing active evidence is not dropped or filled with zero. Sensitivity recomputes a specified changed weight. It is not a confidence interval, significance test or psychometric validation.
+The [rubric](references/rubric.md) anchors clarity, structure, precision, responsiveness, engagement and adaptability on integer 0-10 scales, and defines null missingness, weights and sensitivity. Each non-null rating cites an observation with a supported speaker identity and explains the role/context. `null` means unassessable, not poor. Sensitivity recomputes a specified changed weight; it is not a confidence interval, significance test or psychometric validation.
 
 ## Synthetic transcript example
 
@@ -196,6 +174,13 @@ uv build
 claude plugin validate "$PWD" --strict
 ```
 
-The local smoke run exercised live long-form YouTube discovery, public YouTube audio/caption acquisition, FFmpeg decoding, complete synthetic-transcript review through Claude Code, evidence-reviewer execution, profiles, comparisons, scorecards and report generation. A separate owned two-voice audio sample exercised complete-audio ASR, diarization and independent embedding checks. Model inference used SHA256-verified cached assets; a clean download of all three models was not completed in that run.
+Acceptance checks for long real sources (run from the repository with `uv run`):
 
-These checks establish execution and evidence bookkeeping in the exercised environment, not real-world speaker-attribution accuracy, psychometric validity or guaranteed host-model judgments. Review the underlying evidence before publishing a report. Plugin-directory validation may warn about the optional missing marketplace icon.
+```sh
+# Rolling YouTube auto-captions: parsed words within 1.1x of a last-line reference, no 10 ms flash cues.
+uv run python scripts/check_caption_dedupe.py TRACK.en-orig.vtt
+# Packet bytes relative to stored cue text for one source, after `packets`.
+uv run python scripts/packet_size_ratio.py "$PROJECT" "$SOURCE_ID"
+```
+
+Tests and these checks establish execution and evidence bookkeeping, not real-world speaker-attribution accuracy, psychometric validity or guaranteed host-model judgments. Review the underlying evidence before publishing a report. Plugin-directory validation may warn about the optional missing marketplace icon.

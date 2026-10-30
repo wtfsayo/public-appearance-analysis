@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,10 +13,16 @@ from .reporting import report
 from .store import InputError, connect, load_json
 
 
+def _project(value: str) -> Path:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("--project must name an analysis directory, not an empty string")
+    return Path(value)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="appearance", description="Evidence-linked analysis of public communication. Semantic interpretation is performed by the Claude Code plugin, not fabricated by this CLI.")
     root.add_argument("--version", action="version", version=__version__)
-    root.add_argument("--project", type=Path, default=Path("appearance-analysis"), help="Analysis project directory, separate from the plugin installation")
+    root.add_argument("--project", type=_project, default=Path("appearance-analysis"), help="Analysis project directory created by init, separate from the plugin installation")
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Create an evidence project and the default six-measure rubric")
     commands.add_parser("doctor", help="Inspect tools without downloading models or creating a project")
@@ -64,6 +71,8 @@ def parser() -> argparse.ArgumentParser:
     observations = commands.add_parser("observations", help="List stored analytical evidence, not full source transcripts")
     observations.add_argument("--subject")
     observations.add_argument("--source")
+    observations.add_argument("--limit", type=int, default=200, help="Maximum observations to return (1-1000)")
+    observations.add_argument("--offset", type=int, default=0)
     for command, help_text in [("import-profile", "Import an original evidence-linked person profile"), ("import-scores", "Import subjective ratings, with null for missing evidence"), ("import-comparison", "Import a role-aware comparison across subjects")]:
         item = commands.add_parser(command, help=help_text)
         item.add_argument("file", type=Path)
@@ -94,10 +103,15 @@ def execute(args) -> dict:
     if command == "setup-models":
         from .models import setup_models
         return setup_models(args.models_dir)
-    db = connect(args.project)
+    project = args.project.expanduser().resolve()
+    # bin/appearance exports its plugin root; project data must never land inside the installation.
+    plugin_root = os.environ.get("APPEARANCE_PLUGIN_ROOT")
+    if plugin_root and project.is_relative_to(Path(plugin_root).resolve()):
+        raise InputError(f"Project {project} is inside the plugin installation; choose a separate directory.")
+    db = connect(project, create=command == "init")
     try:
         if command == "init":
-            return {"project": str(args.project.expanduser().resolve()), "database": "analysis.sqlite", "rubric": [dict(row) for row in db.execute("SELECT * FROM rubric")]}
+            return {"project": str(project), "database": "analysis.sqlite", "rubric": [dict(row) for row in db.execute("SELECT * FROM rubric")]}
         if command == "discover":
             from .media import discover
             return discover(db, args.query, limit=args.limit, min_duration=args.min_duration, after=args.after)
@@ -117,11 +131,9 @@ def execute(args) -> dict:
             return analysis.map_speakers(db, args.source_id, load_json(args.input))
         if command == "packets":
             return analysis.packets(db, args.project, args.source_id, size=args.size, context=args.context)
-        if command == "review-batch":
-            return analysis.review_batch(db, load_json(args.input))
-        if command == "revise-observation":
-            return analysis.revise_observation(db, args.observation_id, load_json(args.input))
         if command == "observations":
+            if not 1 <= args.limit <= 1000 or args.offset < 0:
+                raise InputError("--limit must be 1..1000 and --offset nonnegative.")
             conditions, values = [], []
             if args.subject:
                 conditions.append("subject=?")
@@ -130,13 +142,15 @@ def execute(args) -> dict:
                 conditions.append("source_id=?")
                 values.append(args.source)
             where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            total = db.execute("SELECT COUNT(*) FROM observations" + where, values).fetchone()[0]
             result = []
-            for row in db.execute("SELECT * FROM observations" + where + " ORDER BY source_id,id", values):
+            for row in db.execute("SELECT * FROM observations" + where + " ORDER BY source_id,id LIMIT ? OFFSET ?", [*values, args.limit, args.offset]):
                 value = dict(row)
                 for key in ("question_ids", "response_ids", "evidence_ids", "alternatives"):
                     value[key] = json.loads(value[key])
                 result.append(value)
-            return {"observations": result}
+            return {"observations": result, "total": total, "offset": args.offset,
+                    "next_offset": args.offset + len(result) if args.offset + len(result) < total else None}
         if command == "import-profile":
             return analysis.import_profile(db, load_json(args.file))
         if command == "import-scores":

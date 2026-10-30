@@ -1,16 +1,22 @@
 # CLI operation
 
-Use a separate user-owned analysis directory. In plugin skills, `${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code. In a terminal, set `PLUGIN_ROOT` to the downloaded plugin directory yourself. Always quote paths and names. Treat user arguments as data; do not interpolate arbitrary text as shell code.
+Run every command through the wrapper. In plugin skills Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}`; in a terminal, put the downloaded plugin directory in its place. Replace `<PROJECT>` with the absolute path of the user-owned analysis directory in every command, because shell variables do not persist between Bash calls. Quote paths and names, and treat user arguments as data, never as shell code.
 
 ```sh
-"${CLAUDE_PLUGIN_ROOT}/bin/appearance" --project "$PROJECT" status
+"${CLAUDE_PLUGIN_ROOT}/bin/appearance" --project "<PROJECT>" status
 ```
 
-The wrapper resolves its own plugin root and preserves arguments. It invokes `uv run --project ROOT appearance ...`, adding `--extra media` for `diarize` and `--extra asr` for `transcribe` only. Core commands, `doctor` and `setup-models` do not install those large extras. `uv` manages the Python environment; media binaries remain external prerequisites. No plugin command edits Claude Code settings.
+`init` creates the project. Every other project command exits 2 with `no project at PATH; run init first` when the directory has no `analysis.sqlite`, and projects inside the plugin directory are refused. An empty `--project` is rejected.
+
+The wrapper resolves its own plugin root and preserves arguments. It runs `uv run --project ROOT appearance ...`, adding `--extra media` for `diarize` and `--extra asr` for `transcribe` only. The Python environment lives outside the versioned plugin directory, at `$APPEARANCE_VENV`, else `$CLAUDE_PLUGIN_DATA/venv`, else `${XDG_DATA_HOME:-~/.local/share}/public-appearance/venv`, so plugin updates reuse installed extras. Media binaries remain external prerequisites ([setup](setup.md)). No plugin command edits Claude Code settings.
+
+## Long-running commands
+
+`discover`, `ingest` without `--no-audio`, `transcribe`, `diarize` and `setup-models` can run for many minutes on 1–3 hour sources. Run them with `run_in_background: true`, or with `timeout: 600000`. Wait for completion, then read the saved JSON output. Progress lines go to stderr.
 
 ## Commands
 
-Global `--project DIRECTORY` comes before the subcommand. Commands emit JSON to stdout, including report paths. User-facing failures exit 2 with concise stderr. Read the actual JSON response; never guess IDs or output paths. Shell redirection can save a response but does not make raw packets safe to publish.
+Global `--project DIRECTORY` comes before the subcommand. Commands emit JSON to stdout, including report paths. User-facing failures exit 2 with concise stderr. Read the actual JSON response for IDs and output paths. Shell redirection can save a response but does not make raw packets safe to publish.
 
 ```text
 init
@@ -25,7 +31,7 @@ map-speakers SOURCE_ID --input FILE
 packets SOURCE_ID [--size N] [--context N]
 review-batch --input FILE
 revise-observation OBSERVATION_ID --input FILE
-observations [--subject NAME] [--source SOURCE_ID]
+observations [--subject NAME] [--source SOURCE_ID] [--limit N] [--offset N]
 import-profile FILE
 import-scores FILE
 import-comparison FILE
@@ -38,14 +44,26 @@ status
 schema {review,observation,profile,scores,comparison,speakers}
 ```
 
-Discovery defaults favor 20-minute candidates; limit is 1-50 and results use actual upload dates, with unknown dates kept distinct. Date ordering applies only within metadata-enriched relevance-search candidates; it is not a global most-recent search. Packet defaults are 80 target cues plus 3 context cues. For long/dense sources, lower `--size`; do not load all raw packets into one prompt. Read packet files and response paths actually returned by the command. Context cues can support evidence but cannot expand a batch's review target list.
+Discovery defaults favor 20-minute candidates, and limit is 1-50. Search hits whose search-listed duration is below `--min-duration` are skipped before enrichment. The rest are enriched in parallel, in relevance order, until `limit` dated candidates qualify (`stopped_after_limit`). Results use actual upload dates, with unknown dates kept distinct. Date ordering applies only within the enriched candidates; it is not a global most-recent search.
 
-Packet size is 1-150 and context is 0-20. Keep the original packet size when resuming an existing source. The response has `source_id`, `source_cues` and `packets`; each packet entry has `batch_id`, `path`, `reviewed`. Packet files contain `target_cues`, `context_before`, `context_after` and speaker/language metadata. Derive review target IDs from `target_cues[*].id` in order. Media paths returned by ingestion are project-relative; resolve them against the analysis project root, not the plugin or shell directory. Read other returned paths as specified by their command.
+`observations` returns up to `--limit` records (default 200, max 1000) plus `total` and `next_offset`; page with `--offset` until `next_offset` is null.
 
-Read `schema KIND` before composing import payloads. The [JSON reference](json-contract.md) explains citation rules and semantic requirements that a schema alone cannot establish. `status`, `observations` and `audit` expose stored state for resuming an analysis. `audit` reports structural checks, not an independent semantic review.
+## Packets
 
-`ingest` accepts local media or supported HTTP(S) sources. Remote retrieval requires `yt-dlp`; audio decoding/probing requires `ffmpeg` and `ffprobe`. `--no-audio` permits a caption-only workflow but cannot support voice analysis. `import-transcript` accepts time-aligned VTT, SRT or a JSON array with actual `start`, `end`, `text` and optional `speaker`; free text does not have invented timestamps. A transcript's final cue is a duration basis, not proof that it covers the original media.
+Packet size is 1-150 and context is 0-20; defaults are 80 target cues plus 3 context cues. Lower `--size` for long or dense sources, and keep the original size when resuming a source. The response has `source_id`, `source_cues`, `packets` (each with `batch_id`, `path`, `reviewed`) and `identity_warnings`. A non-empty `identity_warnings` names subjects whose observations cannot support numeric scores ([json-contract](json-contract.md#ratings-schema-scores)).
 
-Diarize before packets. Supply `--speakers` only when source evidence supports a participant count; do not assume two people. Anonymous voice clusters, uncertain cues and model diagnostics are not named identities. Transcription uses original-language faster-whisper output and may download the requested ASR model when invoked. Existing captions remain the main cues; ASR provides a cross-check. Without captions, ASR can supply real timed cues. Once packets exist, use a new analysis project for a changed transcript or speaker segmentation rather than mutating frozen evidence.
+Packet files are compact JSON. `cue_fields` names the columns of every cue array in `context_before`, `target_cues` and `context_after`: `[id, start, end, speaker, text]`. Review target IDs are `target_cues[*][0]`, in order. Context cues can support evidence but never join a batch's target list. `independent_asr_cues` (columns in `asr_fields`) appears only when ASR overlaps the window. `unstable_speaker_cue_ids` and `non_caption_channels` appear only when some cue differs from a stable caption label.
 
-To correct an already imported judgment, read `schema observation`, write a complete replacement observation, and run `revise-observation OBSERVATION_ID --input FILE`. The source and subject stay the same. The command archives the previous observation and invalidates that subject's stored profiles/ratings and all project comparisons. Reassess and re-import those artifacts after the correction, then audit and render a fresh report. This corrects interpretation; it does not unfreeze source cues or speaker mapping.
+Media paths returned by ingestion are project-relative; resolve them against the analysis project root. Read other returned paths as their command specifies.
+
+## Evidence freeze
+
+Finish captions, ASR, diarization and speaker mapping before `packets`: the first `packets` call for a source freezes its cue text, segmentation and speaker map. `diarize`, `transcribe`, `map-speakers` and re-imported captions are then refused for that source; a changed transcript or speaker segmentation needs a new analysis project. Corrections to imported judgments use `revise-observation` ([json-contract](json-contract.md#observation-correction-schema-observation)) and leave frozen evidence unchanged.
+
+## Sources and audio
+
+`ingest` accepts local media or supported HTTP(S) sources. Remote retrieval requires `yt-dlp`; audio decoding/probing requires `ffmpeg` and `ffprobe`. `--no-audio` permits a caption-only workflow but cannot support voice analysis. `import-transcript` accepts time-aligned VTT, SRT or a JSON array with actual `start`, `end`, `text` and optional `speaker`; untimed text is rejected. JSON text is never split into a speaker label; use the `speaker` field. A transcript's final cue is a duration basis, not proof that it covers the original media.
+
+When ASR is needed, transcribe before diarizing so voice assignments attach to the new cues. Supply `--speakers` only when source evidence supports a participant count. Anonymous voice clusters, uncertain cues and model diagnostics are not named identities. Transcription uses original-language faster-whisper output and may download the requested ASR model. Existing captions remain the main cues and ASR is a cross-check; without captions, ASR supplies the timed cues. `diarize` and `transcribe` print a summary and write full diagnostics to the returned `diagnostics_path`.
+
+Read `schema KIND` before composing import payloads; [json-contract](json-contract.md) gives the rules a schema cannot express. `status`, `observations` and `audit` expose stored state for resuming an analysis. `audit` reports structural checks, not an independent semantic review.
