@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+if ! command -v uv >/dev/null 2>&1; then
+    printf '%s\n' 'appearance: uv is required; see https://docs.astral.sh/uv/getting-started/installation/' >&2
+    exit 2
+fi
+# Inspect only global CLI options; preserve the original argument vector.
+command_name=
+skip_project=false
+for argument do
+    if [ "$skip_project" = true ]; then
+        skip_project=false
+        continue
+    fi
+    case "$argument" in
+        --project) skip_project=true ;;
+        --project=*) ;;
+        -h|--help) break ;;
+        *) command_name=$argument; break ;;
+    esac
+done
+case "$command_name" in
+    diarize) exec uv run --project "$ROOT" --extra media appearance "$@" ;;
+    transcribe) exec uv run --project "$ROOT" --extra asr appearance "$@" ;;
+    *) exec uv run --project "$ROOT" appearance "$@" ;;
+esac

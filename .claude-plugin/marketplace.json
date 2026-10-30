@@ -1,0 +1,6 @@
+{
+  "name": "public-appearance-local",
+  "owner": {"name": "Public Appearance contributors"},
+  "description": "Local installation source for the Public Appearance plugin.",
+  "plugins": [{"name": "public-appearance", "source": "./"}]
+}

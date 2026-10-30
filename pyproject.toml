@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "public-appearance-analysis"
+version = "1.0.0"
+description = "Evidence-linked public-appearance analysis for Claude Code"
+requires-python = ">=3.11"
+dependencies = ["jsonschema>=4.23,<5"]
+
+[project.optional-dependencies]
+media = ["numpy>=1.26,<3", "soundfile>=0.12,<1", "scikit-learn>=1.5,<2", "sherpa-onnx>=1.12,<3"]
+asr = ["faster-whisper>=1.1,<2"]
+
+[project.scripts]
+appearance = "appearance_analysis.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appearance_analysis"]

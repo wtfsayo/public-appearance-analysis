@@ -1,0 +1,8 @@
+{
+  "name": "public-appearance",
+  "version": "1.0.0",
+  "description": "Full-source, evidence-linked analysis of observable public communication, with role-aware comparisons and subjective scorecards.",
+  "author": {"name": "Public Appearance contributors"},
+  "license": "MIT",
+  "keywords": ["public-communication", "evidence", "interviews", "analysis"]
+}
