@@ -11,7 +11,16 @@ from .store import InputError, load_json
 _CLOCK = r"(?:\d{2,}:)?\d{2}:\d{2}[.,]\d{3}"
 _TIMING = re.compile(rf"^\s*({_CLOCK})\s+-->\s+({_CLOCK})(?:\s+.*)?$")
 _TAG = re.compile(r"<([^>]*)>")
-_LABEL = re.compile(r"^(?:[-–—]\s*)?([\w][\w .’'()\-]{0,79}):[ \t]+(.+)$", re.DOTALL)
+_LABEL = re.compile(r"^(?:(?:>>|[-–—])\s*)?([\w(][\w .’'()\-]{0,79}):[ \t]+(.+)$", re.DOTALL)
+# Lowercased words that mark a sentence prefix ("The real question is: ...") rather than a name.
+# Single-letter "A"/"I" stay allowed because "Q:"/"A:" are common transcript labels.
+_NOT_NAME_WORDS = frozenset({
+    "an", "the", "is", "are", "was", "were", "be", "been", "am", "this", "that", "these", "those",
+    "my", "your", "our", "his", "her", "their", "its", "me", "we", "you", "they", "he", "she", "it",
+    "here", "there", "what", "which", "who", "why", "how", "when", "where", "and", "or", "but", "so",
+    "to", "of", "in", "on", "for", "with", "as", "at", "by", "from", "if", "then", "than", "not",
+})
+_ROLLING_SETTINGS = re.compile(r"\balign:start\b.*\bposition:0%")
 
 
 def _clock(value: str) -> float:
@@ -39,19 +48,35 @@ def _interval(start: object, end: object, index: int) -> tuple[float, float]:
     return first, last
 
 
+def _label(text: str) -> tuple[str, str] | None:
+    """Split a leading `Name: words` speaker label; None when the prefix is ordinary prose."""
+    match = _LABEL.match(text)
+    if match is None:
+        return None
+    name = match[1].strip()
+    tokens = name.split()
+    if not 1 <= len(tokens) <= 4 or name.lower() in {"http", "https"}:
+        return None
+    for token in tokens:
+        bare = token.strip("()")
+        if not bare or bare.lower() in _NOT_NAME_WORDS or not (bare[0].isupper() or bare[0].isdigit()):
+            return None
+    return name, match[2].strip()
+
+
 def _speaker(text: str, voice: str | None) -> tuple[str, str, bool]:
     if voice:
         return text, voice, True
-    match = _LABEL.match(text)
-    if match and match[1].lower() not in {"http", "https"}:
-        return match[2].strip(), match[1].strip(), True
+    labelled = _label(text)
+    if labelled:
+        return labelled[1], labelled[0], True
     return text, "unassigned", False
 
 
 def _payload(payload: str, start: float, end: float) -> list[dict]:
     lines = payload.splitlines()
     labelled = [index for index, line in enumerate(lines)
-                if _LABEL.match(html.unescape(_TAG.sub("", line)).strip())]
+                if _label(html.unescape(_TAG.sub("", line)).strip())]
     if len(labelled) > 1 and not re.search(r"<v(?:[.\s])", payload):
         boundaries = sorted({0, *labelled, len(lines)})
         return [cue for first, last in zip(boundaries, boundaries[1:])
@@ -145,8 +170,28 @@ def _deduplicate(cues: list[dict]) -> list[dict]:
     return sorted(output, key=lambda cue: cue["start"])
 
 
+def _rolling_new_lines(payload: list[str], carry: str | None) -> tuple[list[str], str | None]:
+    """Drop the line a YouTube auto-caption block repeats from the previous block.
+
+    Each rolling block shows the previous block's last line followed by the newly spoken line,
+    and a 10 ms flash block shows only the repeated line. Returns the unseen raw lines and the
+    block's last visible line, which the next block will repeat.
+    """
+    visible = [(line, " ".join(html.unescape(_TAG.sub("", line)).split())) for line in payload]
+    visible = [(line, text) for line, text in visible if text]
+    if not visible:
+        return [], carry
+    last = visible[-1][1]
+    if carry is not None and visible[0][1] == carry:
+        visible = visible[1:]
+    return [line for line, _ in visible], last
+
+
 def _parse_text(content: str, *, vtt: bool) -> list[dict]:
     lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # YouTube auto-captions: word-timed `<c>` spans or `align:start position:0%` cue settings.
+    rolling = vtt and ("<c>" in content or _ROLLING_SETTINGS.search(content) is not None)
+    carry: str | None = None
     cues: list[dict] = []
     previous_start = -1.0
     index = 0
@@ -175,11 +220,12 @@ def _parse_text(content: str, *, vtt: bool) -> list[dict]:
                 raise InputError("Malformed caption timestamp line.")
             payload.append(lines[index])
             index += 1
+        if rolling:
+            payload, carry = _rolling_new_lines(payload, carry)
         cues.extend(_payload("\n".join(payload), start, end))
-    return _deduplicate(cues) if vtt else [
-        {key: value for key, value in cue.items() if not key.startswith("_")}
-        for cue in cues
-    ]
+    if vtt and not rolling:
+        return _deduplicate(cues)
+    return [{key: value for key, value in cue.items() if not key.startswith("_")} for cue in cues]
 
 
 def parse_file(path: Path) -> list[dict]:
@@ -207,9 +253,10 @@ def parse_file(path: Path) -> list[dict]:
             voice = cue.get("speaker")
             if voice is not None and (not isinstance(voice, str) or not voice.strip()):
                 raise InputError(f"Timed JSON cue {index} has an invalid speaker label.")
-            text, speaker, stable = _speaker(" ".join(text.split()), voice.strip() if voice else None)
-            rows.append({"start": start, "end": end, "text": text, "speaker": speaker,
-                         "stable": stable, "channel": "captions"})
+            # Timed JSON carries speakers in its own field; text is never split into a label.
+            rows.append({"start": start, "end": end, "text": " ".join(text.split()),
+                         "speaker": voice.strip() if voice else "unassigned",
+                         "stable": bool(voice), "channel": "captions"})
     elif extension in {".vtt", ".srt"}:
         try:
             content = source.read_text(encoding="utf-8-sig")

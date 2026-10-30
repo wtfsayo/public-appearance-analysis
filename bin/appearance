@@ -5,6 +5,17 @@ if ! command -v uv >/dev/null 2>&1; then
     printf '%s\n' 'appearance: uv is required; see https://docs.astral.sh/uv/getting-started/installation/' >&2
     exit 2
 fi
+# Keep the environment outside the versioned plugin directory so plugin updates reuse installed extras.
+if [ -z "${APPEARANCE_VENV:-}" ]; then
+    if [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
+        APPEARANCE_VENV=$CLAUDE_PLUGIN_DATA/venv
+    else
+        APPEARANCE_VENV=${XDG_DATA_HOME:-$HOME/.local/share}/public-appearance/venv
+    fi
+fi
+export UV_PROJECT_ENVIRONMENT="$APPEARANCE_VENV"
+# The CLI refuses analysis projects inside this directory.
+export APPEARANCE_PLUGIN_ROOT="$ROOT"
 # Inspect only global CLI options; preserve the original argument vector.
 command_name=
 skip_project=false

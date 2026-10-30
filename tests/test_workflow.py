@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from appearance_analysis import analysis
+from appearance_analysis import analysis, cli
 from appearance_analysis.reporting import report
 from appearance_analysis.store import InputError, RUBRIC, add_source, connect, load_json, replace_cues
 
@@ -14,7 +16,7 @@ class EvidenceWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.db = connect(self.root)
+        self.db = connect(self.root, create=True)
         self.addCleanup(self.db.close)
         self.addCleanup(self.temporary.cleanup)
 
@@ -43,7 +45,7 @@ class EvidenceWorkflowTests(unittest.TestCase):
         for index, packet in enumerate(packets["packets"]):
             target = load_json(packet["path"])["target_cues"]
             observations = [self.observation(person, ids)] if index == 0 else []
-            result = analysis.review_batch(self.db, {"batch_id": packet["batch_id"], "reviewed_cue_ids": [row["id"] for row in target], "observations": observations})
+            result = analysis.review_batch(self.db, {"batch_id": packet["batch_id"], "reviewed_cue_ids": [row[0] for row in target], "observations": observations})
             if result["observation_ids"]:
                 observation_id = result["observation_ids"][0]
         return source, ids, observation_id
@@ -100,10 +102,65 @@ class EvidenceWorkflowTests(unittest.TestCase):
         self.db.commit()
         batch = analysis.packets(self.db, self.root, source)["packets"][0]["batch_id"]
         identifier = analysis.review_batch(self.db, {"batch_id": batch, "reviewed_cue_ids": ids, "observations": [self.observation("Casey", ids)]})["observation_ids"][0]
-        with self.assertRaises(InputError):
+        with self.assertRaises(InputError) as caught:
             analysis.import_scores(self.db, self.ratings("Casey", identifier))
+        self.assertIn("speaker mapping", str(caught.exception))
         analysis.import_scores(self.db, self.ratings("Casey", identifier, [None] * 6))
         self.assertIsNone(analysis.scorecard(self.db)["rows"][0]["overall"])
+
+    def test_unlabeled_captions_warn_that_scores_need_a_speaker_mapping(self):
+        source = add_source(self.db, locator="https://example.org/unlabeled", kind="transcript", title="Synthetic unlabeled", subject="Sam Speaker", duration=10)
+        replace_cues(self.db, source, [{"start": 0, "end": 4, "text": "An unlabeled synthetic sentence."},
+                                       {"start": 4, "end": 8, "text": "Another unlabeled synthetic sentence."}])
+        self.db.commit()
+        self.assertIn("Sam Speaker", [item.get("subject") for item in analysis.audit(self.db)["warnings"]])
+        result = analysis.packets(self.db, self.root, source)
+        self.assertEqual([(item["source_id"], item["subject"]) for item in result["identity_warnings"]], [(source, "Sam Speaker")])
+        self.assertIn("map-speakers", result["identity_warnings"][0]["problem"])
+
+    def test_mapped_subject_has_no_identity_warning(self):
+        source, _ = self.source()
+        self.assertEqual(analysis.packets(self.db, self.root, source)["identity_warnings"], [])
+
+    def test_packets_are_compact_cue_arrays(self):
+        source, ids = self.source()
+        packet = analysis.packets(self.db, self.root, source, size=2, context=1)["packets"][0]
+        raw = Path(packet["path"]).read_text()
+        self.assertNotIn("\n", raw)
+        payload = json.loads(raw)
+        self.assertEqual(payload["cue_fields"], ["id", "start", "end", "speaker", "text"])
+        self.assertEqual(payload["target_cues"][0], [ids[0], 0, 4, "Host", "When can the prototype be tested?"])
+        self.assertEqual([row[0] for row in payload["context_after"]], [ids[2]])
+        self.assertNotIn("independent_asr_cues", payload)
+
+    def run_cli(self, *argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                code = cli.main(list(argv))
+            except SystemExit as stopped:
+                code = stopped.code
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_cli_requires_an_initialized_nonempty_project(self):
+        self.assertEqual(self.run_cli("--project", "", "status")[0], 2)
+        missing = self.root / "missing" / "project"
+        code, _, error = self.run_cli("--project", str(missing), "status")
+        self.assertEqual(code, 2)
+        self.assertIn("run init first", error)
+        self.assertFalse((self.root / "missing").exists())
+        self.assertEqual(self.run_cli("--project", str(missing), "init")[0], 0)
+        self.assertEqual(self.run_cli("--project", str(missing), "status")[0], 0)
+
+    def test_cli_observations_are_paged(self):
+        self.complete()
+        self.complete("Morgan", "two")
+        code, output, _ = self.run_cli("--project", str(self.root), "observations", "--limit", "1")
+        self.assertEqual(code, 0)
+        page = json.loads(output)
+        self.assertEqual((len(page["observations"]), page["total"], page["next_offset"]), (1, 2, 1))
+        page = json.loads(self.run_cli("--project", str(self.root), "observations", "--limit", "1", "--offset", "1")[1])
+        self.assertEqual((len(page["observations"]), page["next_offset"]), (1, None))
 
     def test_missing_measure_is_not_zero_and_disabled_weight_does_not_penalize(self):
         _, _, observation = self.complete()

@@ -104,11 +104,14 @@ CREATE TABLE IF NOT EXISTS rendered_reports(
 """
 
 
-def connect(project: str | Path) -> sqlite3.Connection:
+def connect(project: str | Path, *, create: bool = False) -> sqlite3.Connection:
+    """Open a project database; only `create=True` (the `init` command) may create a new project."""
     root = Path(project).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
     if any((root / name).is_symlink() for name in ("internal", "reports", "analysis.sqlite")):
         raise InputError("Project data directories and database must not be symbolic links.")
+    if not create and not (root / "analysis.sqlite").is_file():
+        raise InputError(f"no project at {root}; run init first")
+    root.mkdir(parents=True, exist_ok=True)
     (root / "internal").mkdir(exist_ok=True)
     (root / "reports").mkdir(exist_ok=True)
     db = sqlite3.connect(root / "analysis.sqlite", timeout=30)

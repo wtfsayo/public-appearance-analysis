@@ -377,9 +377,15 @@ def diarize(db, project, source_id, *, speakers: int | None = None, distance: fl
         store.measurement(db, source_id, "audio_duration", duration, "seconds", "Complete decoded WAV duration, not caption duration.")
         store.measurement(db, source_id, "model_speech_coverage", speech_seconds / duration, "fraction", "Model-detected speech, not transcript completeness or accuracy.")
         store.measurement(db, source_id, "speaker_assignment_coverage", assigned_seconds / speech_seconds, "fraction", "Assigned model speech; not diarization accuracy.")
-    return {"source_id": source_id, "status": diagnostics["status"], "voices": [f"Voice {index + 1}" for index in range(voice_count)],
+    detail = store.atomic_text(store.source_dir(project, source_id) / "diarization.json", json.dumps(
+        {"diagnostics": diagnostics, "config": run_config}, ensure_ascii=False, allow_nan=False))
+    return {"source_id": source_id, "status": diagnostics["status"], "issues": issues,
+            "voices": [f"Voice {index + 1}" for index in range(voice_count)],
             "cue_count": len(assignments), "assigned_cues": sum(assignment["stable"] for assignment in assignments),
-            "segments": len(segments), "diagnostics": diagnostics, "config": run_config}
+            "segments": len(segments), "model_speech_coverage": speech_seconds / duration,
+            "speaker_assignment_coverage": assigned_seconds / speech_seconds,
+            "invalidated_speaker_maps": diagnostics["invalidated_speaker_maps"],
+            "limits": diagnostics["limits"], "diagnostics_path": str(detail)}
 
 
 def _normalized_text(text):
@@ -498,5 +504,13 @@ def transcribe(db, project, source_id, *, model: str = "small", language: str | 
             for index, segment in enumerate(segments)))
         _save_run(db, source_id, "asr", run_config, diagnostics)
         store.measurement(db, source_id, "asr_segments", len(segments), "count", "All complete-audio source-language ASR segments, not an accuracy measurement.")
+    detail = store.atomic_text(store.source_dir(project, source_id) / "asr.json", json.dumps(
+        {"diagnostics": diagnostics, "config": run_config}, ensure_ascii=False, allow_nan=False))
+    differs = [check["cue_id"] for check in cross_check if check["status"] == "text_differs"]
     return {"source_id": source_id, "asr_segments": len(segments), "seeded_cues": diagnostics["seeded_cues"],
-            "existing_cues_preserved": bool(cues), "diagnostics": diagnostics, "config": run_config}
+            "existing_cues_preserved": bool(cues), "language": info.language,
+            "language_probability": diagnostics["language_probability"], "language_basis": diagnostics["language_basis"],
+            "cross_check_counts": {status: sum(check["status"] == status for check in cross_check)
+                                   for status in ("text_similar", "text_differs", "no_asr_overlap")},
+            "text_differs_cue_ids": differs[:50], "text_differs_truncated": len(differs) > 50,
+            "limits": diagnostics["limits"], "diagnostics_path": str(detail)}

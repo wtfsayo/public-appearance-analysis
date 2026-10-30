@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -27,6 +28,8 @@ _SECRET_QUERY_KEYS = {
     "password", "passwd", "pwd", "credential", "secret", "jwt", "session", "sessionid",
     "awsaccesskeyid",
 }
+# Parallel yt-dlp metadata extractions in `discover`; each takes roughly 10-15 s.
+_DISCOVER_WORKERS = 6
 
 
 def _date(value: str | None, label: str = "Date") -> str | None:
@@ -200,25 +203,42 @@ def discover(db: sqlite3.Connection, query: str, *, limit: int = 10,
     unknown_duration: list[dict] = []
     failures: list[dict] = []
     seen: set[str] = set()
+    pending: list[tuple[str, str]] = []
+    skipped_short = 0
+    for entry in entries[:search_count]:
+        if not isinstance(entry, dict):
+            continue
+        locator = entry.get("webpage_url") or entry.get("url")
+        if not isinstance(locator, str) or not locator.startswith(("https://", "http://")):
+            video_id = entry.get("id")
+            if not isinstance(video_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                continue
+            locator = f"https://www.youtube.com/watch?v={video_id}"
+        safe_locator = _public_url(locator)
+        if safe_locator in seen:
+            continue
+        seen.add(safe_locator)
+        # Flat search already reports most durations; skip short hits before the slow per-video extraction.
+        try:
+            flat_duration = _duration(entry.get("duration"))
+        except InputError:
+            flat_duration = None
+        if flat_duration is not None and flat_duration < minimum:
+            skipped_short += 1
+            continue
+        pending.append((locator, safe_locator))
     enriched = 0
-    with db:
-        for entry in entries[:search_count]:
-            if not isinstance(entry, dict):
-                continue
-            locator = entry.get("webpage_url") or entry.get("url")
-            if not isinstance(locator, str) or not locator.startswith(("https://", "http://")):
-                video_id = entry.get("id")
-                if not isinstance(video_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-                    continue
-                locator = f"https://www.youtube.com/watch?v={video_id}"
-            safe_locator = _public_url(locator)
-            if safe_locator in seen:
-                continue
-            seen.add(safe_locator)
+    stopped_early = False
+    with ThreadPoolExecutor(max_workers=_DISCOVER_WORKERS) as pool, db:
+        futures = [pool.submit(_extract, locator) for locator, _ in pending]
+        for number, (future, (_, safe_locator)) in enumerate(zip(futures, pending), 1):
             try:
-                candidate, metadata = _candidate(_extract(locator), safe_locator)
+                candidate, metadata = _candidate(future.result(), safe_locator)
             except InputError as exc:
+                candidate = None
                 failures.append({"url": safe_locator, "error": str(exc)})
+            print(f"discover: enriched {number}/{len(pending)}", file=sys.stderr, flush=True)
+            if candidate is None:
                 continue
             enriched += 1
             db.execute("""INSERT INTO candidates(locator,title,publisher,upload_date,duration,metadata)
@@ -233,13 +253,20 @@ def discover(db: sqlite3.Connection, query: str, *, limit: int = 10,
                     undated.append(candidate)
                 elif boundary is None or candidate["upload_date"] >= boundary:
                     dated.append(candidate)
+            if len(dated) >= limit and number < len(futures):
+                stopped_early = True
+                for remaining in futures[number:]:
+                    remaining.cancel()
+                break
     dated.sort(key=lambda candidate: candidate["upload_date"], reverse=True)
     return {"query": query.strip(), "candidates": dated[:limit], "missing_upload_date": undated,
             "missing_duration": unknown_duration, "metadata_failures": failures,
-            "searched": len(entries[:search_count]), "enriched": enriched,
+            "searched": len(entries[:search_count]), "skipped_short": skipped_short, "enriched": enriched,
+            "stopped_after_limit": stopped_early,
             "min_duration": minimum, "after_inclusive": boundary,
             "limitations": [
                 "YouTube ytsearch is relevance-ranked, not an exhaustive upload-date search. Results are newest only within the enriched search sample.",
+                "Enrichment follows relevance order and stops once enough dated candidates qualify (stopped_after_limit); later search hits are not inspected.",
                 "Candidates with no actual upload date are listed separately and are not claimed to be recent; unknown durations cannot satisfy the duration filter.",
                 "Upload dates are publisher metadata, not necessarily recording dates. LIVE labels do not establish a genuine continuous interview; inspect the source.",
             ]}
@@ -677,12 +704,13 @@ def doctor() -> dict:
             except importlib.metadata.PackageNotFoundError:
                 entry["version_status"] = "module available; package metadata unavailable"
         dependencies[module] = entry
+    diarization_ready = all(dependencies[name]["installed"] for name in ("numpy", "soundfile", "sklearn", "sherpa_onnx"))
     return {"binaries": binaries, "python_dependencies": dependencies,
             "capabilities": {"url_sources": binaries["yt-dlp"]["installed"] or dependencies["yt_dlp"]["installed"],
                              "audio_decode": binaries["ffmpeg"]["installed"] and binaries["ffprobe"]["installed"],
-                             "diarization_dependencies": all(dependencies[name]["installed"]
-                                                            for name in ("numpy", "soundfile", "sklearn", "sherpa_onnx")),
-                             "asr_dependency": dependencies["faster_whisper"]["installed"]},
+                             # The wrapper installs these extras on the first diarize/transcribe call.
+                             "diarization_dependencies": "installed" if diarization_ready else "installed on first diarize",
+                             "asr_dependency": "installed" if dependencies["faster_whisper"]["installed"] else "installed on first transcribe"},
             "notes": ["No models are loaded or downloaded by doctor. Installed modules do not establish model availability.",
                       "Install the FFmpeg binaries and yt-dlp for public media. Diarization uses the media extra; transcription uses the asr extra.",
                       "Current YouTube extraction may require yt-dlp-ejs and a supported JavaScript runtime; consult yt-dlp installation guidance."]}
